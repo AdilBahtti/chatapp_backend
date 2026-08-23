@@ -23,16 +23,47 @@ const app = express();
 // truthful once the proxy headers are trusted.
 app.set('trust proxy', 1);
 
-// CLIENT_URL takes one origin or a comma-separated list. Unset means
-// allow-all, which keeps local dev and preview deployments frictionless.
+/*
+  CLIENT_URL takes one origin or a comma-separated list; unset means allow-all.
+
+  A browser's `Origin` header is always scheme://host[:port] — never a trailing
+  slash, never a path. Pasting "https://app.vercel.app/" into the dashboard
+  therefore matches nothing, the preflight comes back without an
+  Access-Control-Allow-Origin header, and the browser reports the blocked
+  request as a bare "Network Error" with no clue as to why. Normalising both
+  sides removes that whole failure mode.
+*/
+const toOrigin = (value) => {
+  try {
+    return new URL(value.trim()).origin;
+  } catch {
+    // Not a parseable URL — fall back to trimming the obvious mistakes so a
+    // slightly-off value still has a chance of matching.
+    return value.trim().replace(/\/+$/, '').toLowerCase();
+  }
+};
+
 const allowedOrigins = (process.env.CLIENT_URL || '')
   .split(',')
   .map((origin) => origin.trim())
-  .filter(Boolean);
+  .filter(Boolean)
+  .map(toOrigin);
 
 app.use(
   cors({
-    origin: allowedOrigins.length ? allowedOrigins : '*',
+    origin(origin, callback) {
+      // No Origin header at all: curl, Postman, health checks, same-origin.
+      if (!origin) return callback(null, true);
+      if (!allowedOrigins.length) return callback(null, true);
+      if (allowedOrigins.includes(toOrigin(origin))) return callback(null, true);
+
+      // Log the rejection so the cause is visible in the Vercel function logs
+      // instead of only in the browser as an unexplained network failure.
+      console.warn(
+        `CORS: blocked origin ${origin}. CLIENT_URL allows: ${allowedOrigins.join(', ') || '(none)'}`
+      );
+      return callback(null, false);
+    },
     credentials: allowedOrigins.length > 0,
   })
 );
@@ -44,7 +75,14 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+  res.status(200).json({
+    status: 'ok',
+    uptime: process.uptime(),
+    // Public origins, not secrets. Lets you confirm what CLIENT_URL actually
+    // parsed to without redeploying to add a console.log.
+    allowedOrigins: allowedOrigins.length ? allowedOrigins : 'all (CLIENT_URL not set)',
+    requestOrigin: req.headers.origin || null,
+  });
 });
 
 // A serverless invocation can start with a cold, disconnected mongoose. Every
