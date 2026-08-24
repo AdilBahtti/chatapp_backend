@@ -1,16 +1,49 @@
 /*
-  Vercel serverless entry point.
+  Vercel serverless entry point — named explicitly in vercel.json's `builds`,
+  so there is no auto-detection to get wrong. Every path is routed here and
+  Express does the rest; `req.url` arrives unchanged.
 
-  Vercel discovers this file, wraps the exported Express app as a Node function,
-  and vercel.json rewrites every incoming path to it — so `req.url` still reads
-  `/api/messages/123` and the app's own routing does the rest.
-
-  Socket.IO is deliberately absent: a function instance is torn down after the
-  response, so it cannot hold the long-lived connection a WebSocket needs. The
-  socket helpers in ../socket use optional chaining on a null `io`, which means
-  the REST endpoints keep working and simply emit nothing here.
+  Socket.IO is deliberately absent. A function instance is destroyed once the
+  response is sent, so it cannot hold the long-lived connection a WebSocket
+  needs. The helpers in ../socket use optional chaining on a null `io`, so the
+  REST endpoints work normally here and simply emit nothing.
 */
 
-const app = require('../app');
+let app;
+let loadError = null;
 
-module.exports = app;
+/*
+  If requiring the app throws — a missing dependency, a bad env var read at
+  module scope, a syntax error — Vercel has no handler to call and reports a
+  bare 500 FUNCTION_INVOCATION_FAILED with the real cause buried in the runtime
+  logs. Catching it lets the response itself carry the reason.
+*/
+try {
+  app = require('../app');
+} catch (error) {
+  loadError = error;
+  console.error('Failed to load Express app:', error);
+}
+
+module.exports = (req, res) => {
+  if (loadError) {
+    res.statusCode = 500;
+    res.setHeader('Content-Type', 'application/json');
+    return res.end(
+      JSON.stringify({
+        message: 'Backend failed to start',
+        error: loadError.message,
+        stack: process.env.NODE_ENV === 'production' ? undefined : loadError.stack,
+      })
+    );
+  }
+
+  // Insurance only: the legacy `routes` config preserves the original URL, but
+  // if a platform change ever handed us the destination file path instead,
+  // Express would 404 every request with no clue why.
+  if (req.url === '/api/index.js' || req.url.startsWith('/api/index.js?')) {
+    req.url = req.url.replace('/api/index.js', '') || '/';
+  }
+
+  return app(req, res);
+};

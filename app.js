@@ -17,6 +17,20 @@ const messageRoutes = require('./router/messageRoute');
   Nothing here may assume the process stays alive between requests.
 */
 
+/*
+  Env vars are the number one cause of a 500 on a fresh Vercel project: the code
+  is fine, the dashboard just has nothing in it. Missing values used to surface
+  as unrelated errors — no JWT_SECRET made jwt.sign() throw inside a controller's
+  catch, which answered "500 Error logging in" and named nothing. Check up front
+  and say exactly which variable is absent.
+*/
+const REQUIRED_ENV = ['MONGODB_URL', 'JWT_SECRET'];
+const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+
+if (missingEnv.length) {
+  console.error(`Missing required environment variables: ${missingEnv.join(', ')}`);
+}
+
 const app = express();
 
 // Vercel terminates TLS at the edge, so req.protocol / req.ip are only
@@ -75,13 +89,23 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
+  res.status(missingEnv.length ? 500 : 200).json({
+    status: missingEnv.length ? 'misconfigured' : 'ok',
+    missingEnv,
     uptime: process.uptime(),
     // Public origins, not secrets. Lets you confirm what CLIENT_URL actually
     // parsed to without redeploying to add a console.log.
     allowedOrigins: allowedOrigins.length ? allowedOrigins : 'all (CLIENT_URL not set)',
     requestOrigin: req.headers.origin || null,
+  });
+});
+
+app.use((req, res, next) => {
+  if (!missingEnv.length) return next();
+  res.status(500).json({
+    message:
+      `Server is missing required environment variables: ${missingEnv.join(', ')}. ` +
+      `Set them in the Vercel project settings and redeploy.`,
   });
 });
 
